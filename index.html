@@ -357,6 +357,120 @@
     padding-bottom: 4px;
   }
 
+  /* ===================== TRACKS PANEL ===================== */
+  .tracks-panel {
+    width: 100%;
+    max-width: 1100px;
+    margin-bottom: 14px;
+    background: rgba(26,14,5,0.7);
+    border: 1px solid rgba(200,114,10,0.2);
+    border-radius: 10px;
+    padding: 10px 14px;
+  }
+  .tracks-header {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.05rem;
+    color: var(--amber-bright);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .tracks-empty {
+    font-size: 0.85rem;
+    color: var(--fret);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .track-add-btn {
+    background: rgba(200,114,10,0.18);
+    border: 1px solid rgba(200,114,10,0.35);
+    color: var(--amber-bright);
+    border-radius: 6px;
+    padding: 2px 10px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: bold;
+    transition: background 0.2s;
+  }
+  .track-add-btn:hover { background: rgba(200,114,10,0.35); }
+  .track-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    margin-bottom: 4px;
+    background: rgba(45,26,10,0.5);
+    border: 1px solid transparent;
+    transition: border-color 0.2s, background 0.2s;
+    flex-wrap: wrap;
+  }
+  .track-row.track-selected {
+    border-color: rgba(200,114,10,0.5);
+    background: rgba(45,26,10,0.8);
+  }
+  .track-name {
+    min-width: 100px;
+    font-weight: bold;
+    color: var(--cream);
+    cursor: pointer;
+    font-size: 0.92rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .track-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .track-mute-btn, .track-solo-btn {
+    width: 26px; height: 26px;
+    border-radius: 5px;
+    border: 1px solid rgba(200,114,10,0.3);
+    background: rgba(200,114,10,0.08);
+    color: var(--fret);
+    font-weight: bold;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .track-mute-btn.active {
+    background: rgba(255,60,60,0.25);
+    color: #ff6060;
+    border-color: rgba(255,60,60,0.5);
+  }
+  .track-solo-btn.active {
+    background: rgba(255,200,40,0.25);
+    color: #ffc828;
+    border-color: rgba(255,200,40,0.5);
+  }
+  .track-vol {
+    width: 80px;
+    accent-color: var(--amber);
+  }
+  .track-del-btn {
+    width: 24px; height: 24px;
+    border-radius: 5px;
+    border: 1px solid rgba(200,114,10,0.2);
+    background: transparent;
+    color: var(--fret);
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: color 0.15s;
+  }
+  .track-del-btn:hover { color: #ff5050; }
+  .track-instruments {
+    font-size: 0.75rem;
+    color: var(--fret);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+
   .step-cell {
     flex-shrink: 0;
     width: 100px;
@@ -1295,6 +1409,84 @@ let currentChordGroupId = 0;
 // --- Voice leading state ---
 let previousVoicingPitches = null;
 
+// ===================== MULTI-TRACK SYSTEM =====================
+let tracks = [];
+let activeTrackIndex = 0;
+
+function createTrack(opts = {}) {
+  return {
+    name:        opts.name        || 'Track',
+    instruments: sanitizeInstrumentList(opts.instruments || ['steel'], 'steel'),
+    steps:       Array.isArray(opts.steps) ? opts.steps : null,
+    volume:      Number.isFinite(opts.volume) ? clamp(opts.volume, 0, 1) : 1,
+    mute:        Boolean(opts.mute),
+    solo:        Boolean(opts.solo),
+    chordGroupId: 0,
+    activeVoices: [],
+    previousVoicingPitches: null,
+  };
+}
+
+function getTrackSteps(track) {
+  return Array.isArray(track.steps) && track.steps.length ? track.steps : steps;
+}
+
+function isTrackAudible(track, allTracks) {
+  if (track.mute) return false;
+  const hasSolo = allTracks.some(t => t.solo);
+  return hasSolo ? track.solo : true;
+}
+
+function getAudibleTracks() {
+  if (!tracks.length) return null;
+  return tracks.filter(t => isTrackAudible(t, tracks));
+}
+
+function registerTrackVoice(track, voice) {
+  if (!voice || typeof voice.stop !== 'function') return;
+  voice.chordGroupId = track ? track.chordGroupId : currentChordGroupId;
+  voice._trackId = track ? tracks.indexOf(track) : -1;
+  if (track) {
+    pruneTrackVoices(track);
+    track.activeVoices.push(voice);
+    while (track.activeVoices.length > MAX_ACTIVE_VOICES) {
+      const oldest = track.activeVoices.shift();
+      stopTrackedVoice(oldest, 0.012);
+    }
+  } else {
+    registerActiveVoice(voice);
+  }
+}
+
+function pruneTrackVoices(track) {
+  if (!ctx || !track.activeVoices.length) return;
+  const now = ctx.currentTime;
+  track.activeVoices = track.activeVoices.filter(v =>
+    !Number.isFinite(v.expiresAt) || v.expiresAt > now - 0.05
+  );
+}
+
+function stopPreviousTrackVoices(track, releaseSecs = 0.025) {
+  if (!track || !track.activeVoices.length) return;
+  const threshold = track.chordGroupId - 1;
+  const toStop = [];
+  track.activeVoices = track.activeVoices.filter(v => {
+    if (Number.isFinite(v.chordGroupId) && v.chordGroupId <= threshold) {
+      toStop.push(v);
+      return false;
+    }
+    return true;
+  });
+  toStop.forEach(v => stopTrackedVoice(v, releaseSecs));
+}
+
+function stopAllTrackVoices(releaseSecs = 0.025) {
+  tracks.forEach(t => {
+    const voices = t.activeVoices.splice(0, t.activeVoices.length);
+    voices.forEach(v => stopTrackedVoice(v, releaseSecs));
+  });
+}
+
 // --- Lookahead scheduler ---
 let schedulerIntervalId = null;
 let nextStepAudioTime = 0;
@@ -1988,7 +2180,11 @@ async function loadSelectedInstruments() {
   const selected = getActiveInstrumentList();
   if (!selected.length) return false;
 
-  const results = await Promise.all(selected.map(type => loadInstrument(type)));
+  // Also load instruments from all tracks
+  const trackInsts = tracks.flatMap(t => t.instruments);
+  const allInsts = [...new Set([...selected, ...trackInsts])];
+
+  const results = await Promise.all(allInsts.map(type => loadInstrument(type)));
   updateLegacyInstrumentState();
 
   const loadedCount = results.filter(Boolean).length;
@@ -4369,6 +4565,52 @@ function collectPromptSettings() {
   };
 }
 
+/**
+ * Strip JS-style comments from a JSON-like string without breaking strings.
+ * Handles // line comments, /* block comments *​/, and bare ... ellipsis lines.
+ */
+function stripJsonComments(str) {
+  let result = '';
+  let i = 0;
+  const len = str.length;
+  while (i < len) {
+    const ch = str[i];
+    // String literal — copy as-is, respecting escapes
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < len) {
+        if (str[j] === '\\') { j += 2; continue; }
+        if (str[j] === '"') { j++; break; }
+        j++;
+      }
+      result += str.slice(i, j);
+      i = j;
+      continue;
+    }
+    // Block comment /* ... */
+    if (ch === '/' && str[i + 1] === '*') {
+      const end = str.indexOf('*/', i + 2);
+      i = end === -1 ? len : end + 2;
+      continue;
+    }
+    // Line comment //
+    if (ch === '/' && str[i + 1] === '/') {
+      const nl = str.indexOf('\n', i + 2);
+      i = nl === -1 ? len : nl;
+      continue;
+    }
+    // Bare ellipsis ("...") outside strings — skip
+    if (ch === '.' && str[i + 1] === '.' && str[i + 2] === '.') {
+      i += 3;
+      continue;
+    }
+    result += ch;
+    i++;
+  }
+  // Remove trailing commas before } or ] (common after stripping comments)
+  return result.replace(/,\s*([}\]])/g, '$1');
+}
+
 function extractJsonObjectFromText(text) {
   if (!text || typeof text !== 'string') throw new Error('Empty text');
   const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -4376,6 +4618,9 @@ function extractJsonObjectFromText(text) {
 
   // Remove accidental code-fence markers inside the JSON and non-printable control chars
   raw = raw.replace(/```/g, '').replace(/\u0000/g, '').trim();
+
+  // Strip JS-style comments and ellipsis so users can paste annotated JSON
+  raw = stripJsonComments(raw);
 
   try {
     return JSON.parse(raw);
@@ -4896,6 +5141,52 @@ function applyScriptObject(script) {
 
   setActiveInstruments(parsedScript.instruments, { quiet: true });
 
+  // ===================== TRACKS =====================
+  // Parse tracks[] from JSON: each track has its own instruments, steps, volume, mute/solo
+  if (Array.isArray(parsedScript.tracks) && parsedScript.tracks.length) {
+    tracks = parsedScript.tracks.map(t => {
+      const track = createTrack({
+        name: t.name,
+        instruments: t.instruments,
+        volume: Number.isFinite(t.volume) ? (t.volume > 1 ? t.volume / 100 : t.volume) : 1,
+        mute: t.mute,
+        solo: t.solo,
+      });
+      // Per-track steps (optional; if absent, uses main steps)
+      if (Array.isArray(t.steps) && t.steps.length) {
+        track.steps = t.steps.map(s => {
+          if (!s || typeof s !== 'object') return { chord: '—' };
+          const c = normalizeChordToken(s.chord) || '—';
+          return {
+            chord: c,
+            strumOverride: Number.isInteger(s.strumOverride) ? s.strumOverride : null,
+            modeOverride: normalizeMode(s.modeOverride, null),
+            singleStringOverride: parseSingleStringLoose(s.singleStringOverride) ?? null,
+            vel: Number.isFinite(s.vel) ? clamp(Math.round(s.vel), 0, 100) : null,
+            accent: Number.isFinite(s.accent) ? +s.accent : null,
+            hits: Array.isArray(s.hits) ? s.hits.map(h => ({ type: h.type || 'down', vel: h.vel ?? null, swing: h.swing ?? null, spread: h.spread ?? null, take: h.take ?? null })) : null,
+            riff: s.riff || null,
+            riffBeats: s.riffBeats ?? null,
+            pickPattern: s.pickPattern || null,
+            pickBeats: s.pickBeats ?? null,
+            pickThenMode: s.pickThenMode || null,
+            humanizeVel: s.humanizeVel ?? null,
+            pushMs: s.pushMs ?? null,
+            swingOverride: s.swingOverride ?? null,
+          };
+        });
+      }
+      // Ensure track instruments are loaded
+      track.instruments.forEach(type => {
+        if (!loadedInstruments[type] && ctx && wafPlayer) loadInstrument(type);
+      });
+      return track;
+    });
+    renderTracksUI();
+  } else {
+    tracks = [];
+  }
+
   currentStep = 0;
   updateChordDisplay(steps[0] ? steps[0].chord : CHORD_NAMES[CHORD_NAMES.length - 1]);
   flashStatus(`Скрипт завантажено: ${parsedScript.song}`, 1900);
@@ -4948,8 +5239,151 @@ function exportCurrentScript() {
   if (capo) payload.capo = capo;
   if (Array.isArray(tuning)) payload.tuning = tuning.slice();
   if (singleString !== null) payload.singleString = singleString;
+  // Export tracks if defined
+  if (tracks.length) {
+    payload.tracks = tracks.map(t => {
+      const td = { name: t.name, instruments: [...t.instruments], volume: Math.round(t.volume * 100) };
+      if (t.mute) td.mute = true;
+      if (t.solo) td.solo = true;
+      if (Array.isArray(t.steps) && t.steps.length) {
+        td.steps = t.steps.map(s => {
+          const item = { chord: s.chord };
+          if (s.modeOverride) item.modeOverride = s.modeOverride;
+          if (Number.isFinite(s.vel)) item.vel = s.vel;
+          if (Number.isFinite(s.accent)) item.accent = s.accent;
+          if (s.strumOverride !== null) item.strumOverride = s.strumOverride;
+          if (s.riff) item.riff = Object.assign({}, s.riff);
+          if (s.riffBeats) item.riffBeats = s.riffBeats;
+          if (s.pickPattern) item.pickPattern = s.pickPattern;
+          if (s.pickBeats) item.pickBeats = s.pickBeats;
+          if (s.pickThenMode) item.pickThenMode = s.pickThenMode;
+          if (Array.isArray(s.hits)) item.hits = s.hits;
+          return item;
+        });
+        td.numSteps = td.steps.length;
+      }
+      return td;
+    });
+  }
   document.getElementById('jsonScriptInput').value = JSON.stringify(payload, null, 2);
   flashStatus('JSON експортовано');
+}
+
+// ===================== TRACK UI =====================
+function addTrack(opts = {}) {
+  const track = createTrack(opts);
+  tracks.push(track);
+  // Load instruments for the new track
+  if (ctx && wafPlayer) {
+    track.instruments.forEach(type => { if (!loadedInstruments[type]) loadInstrument(type); });
+  }
+  renderTracksUI();
+  return track;
+}
+
+function removeTrack(index) {
+  if (index < 0 || index >= tracks.length) return;
+  const t = tracks[index];
+  // Stop its voices
+  const voices = t.activeVoices.splice(0, t.activeVoices.length);
+  voices.forEach(v => stopTrackedVoice(v, 0.01));
+  tracks.splice(index, 1);
+  if (activeTrackIndex >= tracks.length) activeTrackIndex = Math.max(0, tracks.length - 1);
+  renderTracksUI();
+}
+
+function toggleTrackMute(index) {
+  if (!tracks[index]) return;
+  tracks[index].mute = !tracks[index].mute;
+  renderTracksUI();
+}
+
+function toggleTrackSolo(index) {
+  if (!tracks[index]) return;
+  tracks[index].solo = !tracks[index].solo;
+  renderTracksUI();
+}
+
+function setTrackVolume(index, vol) {
+  if (!tracks[index]) return;
+  tracks[index].volume = clamp(vol, 0, 1);
+}
+
+function renderTracksUI() {
+  let container = document.getElementById('tracksPanel');
+  if (!container) {
+    // Create the tracks panel element dynamically
+    const anchor = document.getElementById('stepsContainer')?.parentElement;
+    if (!anchor) return;
+    container = document.createElement('div');
+    container.id = 'tracksPanel';
+    container.className = 'tracks-panel';
+    anchor.insertBefore(container, document.getElementById('stepsContainer'));
+  }
+
+  if (!tracks.length) {
+    container.innerHTML = '<div class="tracks-empty">Один трек (класичний режим) · <button id="addTrackBtn" class="track-add-btn">+ Додати трек</button></div>';
+    const addBtn = container.querySelector('#addTrackBtn');
+    if (addBtn) addBtn.addEventListener('click', () => {
+      // Auto-create 2 tracks from current state: guitar + bass
+      const currentInsts = getActiveInstrumentList();
+      const bassInsts = currentInsts.filter(t => (INSTRUMENT_LIBRARY[t] || {}).bassOnly);
+      const guitarInsts = currentInsts.filter(t => !(INSTRUMENT_LIBRARY[t] || {}).bassOnly);
+      addTrack({ name: '🎸 Гітара', instruments: guitarInsts.length ? guitarInsts : ['steel'] });
+      if (bassInsts.length) {
+        addTrack({ name: '🎸 Бас', instruments: bassInsts });
+      } else {
+        addTrack({ name: '🎸 Бас', instruments: ['bf-0340-flu'] });
+      }
+    });
+    return;
+  }
+
+  let html = '<div class="tracks-header">🎚️ Доріжки <button id="addNewTrackBtn" class="track-add-btn" title="Додати трек">+</button></div>';
+  tracks.forEach((track, idx) => {
+    const muteClass = track.mute ? 'active' : '';
+    const soloClass = track.solo ? 'active' : '';
+    const volPct = Math.round(track.volume * 100);
+    const instNames = track.instruments.map(t => {
+      const cfg = INSTRUMENT_LIBRARY[t];
+      return cfg ? (cfg.shortLabel || cfg.label) : t;
+    }).join(', ');
+    html += `
+      <div class="track-row ${idx === activeTrackIndex ? 'track-selected' : ''}" data-track="${idx}">
+        <div class="track-name" data-track="${idx}" title="${instNames}">${track.name}</div>
+        <div class="track-controls">
+          <button class="track-mute-btn ${muteClass}" data-track="${idx}" title="Mute">M</button>
+          <button class="track-solo-btn ${soloClass}" data-track="${idx}" title="Solo">S</button>
+          <input type="range" class="track-vol" data-track="${idx}" min="0" max="100" value="${volPct}" title="Гучність ${volPct}%">
+          <button class="track-del-btn" data-track="${idx}" title="Видалити">✕</button>
+        </div>
+        <div class="track-instruments">${instNames}</div>
+      </div>`;
+  });
+  container.innerHTML = html;
+
+  // Event listeners
+  container.querySelector('#addNewTrackBtn')?.addEventListener('click', () => {
+    addTrack({ name: `Track ${tracks.length + 1}`, instruments: ['steel'] });
+  });
+  container.querySelectorAll('.track-mute-btn').forEach(btn =>
+    btn.addEventListener('click', () => toggleTrackMute(parseInt(btn.dataset.track)))
+  );
+  container.querySelectorAll('.track-solo-btn').forEach(btn =>
+    btn.addEventListener('click', () => toggleTrackSolo(parseInt(btn.dataset.track)))
+  );
+  container.querySelectorAll('.track-vol').forEach(slider =>
+    slider.addEventListener('input', e => setTrackVolume(parseInt(e.target.dataset.track), parseInt(e.target.value) / 100))
+  );
+  container.querySelectorAll('.track-del-btn').forEach(btn =>
+    btn.addEventListener('click', () => removeTrack(parseInt(btn.dataset.track)))
+  );
+  container.querySelectorAll('.track-name').forEach(el =>
+    el.addEventListener('click', () => {
+      activeTrackIndex = parseInt(el.dataset.track);
+      renderTracksUI();
+    })
+  );
 }
 
 function buildScriptFromProgression(chords, songName = 'Tab Import') {
@@ -5378,8 +5812,8 @@ function midiToFreq(midi) {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
-function getPlaybackInstrumentLayers(articulation = {}) {
-  const selected = getActiveInstrumentList();
+function getPlaybackInstrumentLayers(articulation = {}, trackInstruments = null) {
+  const selected = trackInstruments || getActiveInstrumentList();
   const stringIndex = Number.isInteger(articulation.stringIndex)
     ? articulation.stringIndex
     : null;
@@ -5393,7 +5827,7 @@ function getPlaybackInstrumentLayers(articulation = {}) {
   });
 }
 
-function playNote(pitch, time, duration, gainVal, articulation = {}) {
+function playNote(pitch, time, duration, gainVal, articulation = {}, trackCtx = null) {
   if (!ctx) return;
   const {
     stringIndex = 0,
@@ -5420,9 +5854,11 @@ function playNote(pitch, time, duration, gainVal, articulation = {}) {
   const sustainHuman = muted ? 1 : getVelocityHumanizeMultiplier(stepMeta, 0.25);
   const safeReleaseBias = Math.max(0.55, Number.isFinite(releaseBias) ? releaseBias : 1);
   const playedDuration = Math.max(0.045, cappedDuration * sustainBase * sustainHuman * safeReleaseBias);
-  const layers = getPlaybackInstrumentLayers({ ...articulation, stringIndex: idx });
+  const layers = getPlaybackInstrumentLayers({ ...articulation, stringIndex: idx },
+    trackCtx ? trackCtx.instruments : null);
   if (!layers.length) return;
 
+  const trackVolume = trackCtx ? trackCtx.volume : 1;
   const mixNormalize = 1 / Math.sqrt(layers.length);
   layers.forEach((type, layerIndex) => {
     const cfg = INSTRUMENT_LIBRARY[type] || INSTRUMENT_LIBRARY.steel;
@@ -5437,8 +5873,8 @@ function playNote(pitch, time, duration, gainVal, articulation = {}) {
     const layerWhen = ctx.currentTime + layerTime;
     const layerGain = Math.max(
       0,
-      Math.min(1, safeGain * (cfg.mixGain || 1) * mixNormalize * (1 - layerIndex * 0.03))
-    );
+      Math.min(1, safeGain * (cfg.mixGain || 1) * mixNormalize * (1 - layerIndex * 0.03) * trackVolume
+    ));
     const layerInstrument = loadedInstruments[type] || null;
     // Route bass instruments to dedicated bass bus
     const outputNode = isBass && bassLowPass ? bassLowPass : (dryGain || masterGain);
@@ -5455,7 +5891,7 @@ function playNote(pitch, time, duration, gainVal, articulation = {}) {
           layerGain
         );
         if (envelope) {
-          registerActiveVoice({
+          const voiceObj = {
             expiresAt: layerWhen + layerDuration + 0.1,
             stop(releaseSecs = 0.02) {
               if (!ctx) return;
@@ -5472,7 +5908,12 @@ function playNote(pitch, time, duration, gainVal, articulation = {}) {
                 // ignore source stop errors
               }
             }
-          });
+          };
+          if (trackCtx) {
+            registerTrackVoice(trackCtx._track, voiceObj);
+          } else {
+            registerActiveVoice(voiceObj);
+          }
         }
         if (wafReverb && !muted) {
           wafPlayer.queueWaveTable(
@@ -5492,7 +5933,11 @@ function playNote(pitch, time, duration, gainVal, articulation = {}) {
     }
 
     const fallbackVoice = playNoteFallback(midiToFreq(layerPitch), layerTime, layerDuration, layerGain);
-    registerActiveVoice(fallbackVoice);
+    if (trackCtx) {
+      registerTrackVoice(trackCtx._track, fallbackVoice);
+    } else {
+      registerActiveVoice(fallbackVoice);
+    }
   });
 }
 
@@ -5507,6 +5952,7 @@ function strumStroke(notes, {
   mode = 'strum-down',
   stepMeta = null,
   chordRoot = null,
+  trackCtx = null,
 } = {}) {
   if (!Array.isArray(notes) || notes.length === 0) return;
   const order = direction === 'up' ? [...notes].reverse() : [...notes];
@@ -5536,12 +5982,13 @@ function strumStroke(notes, {
         stepMeta,
         releaseBias: mode === 'slow-strum' ? 1.1 : 1,
         chordRoot,
-      }
+      },
+      trackCtx
     );
   });
 }
 
-function mutedStroke(notes, time = 0, gain = 0.28) {
+function mutedStroke(notes, time = 0, gain = 0.28, trackCtx = null) {
   if (!ctx) return;
   if (!Array.isArray(notes) || notes.length === 0) return;
   // Choose a center pitch for a faint tone (middle of the voicing)
@@ -5589,12 +6036,13 @@ function mutedStroke(notes, time = 0, gain = 0.28) {
       t,
       0.045,
       Math.max(0.06, gain * 0.28) * (0.85 + Math.random() * 0.2),
-      { stringIndex: note.stringIndex, direction: 'down', muted: true, accent: 0.8 }
+      { stringIndex: note.stringIndex, direction: 'down', muted: true, accent: 0.8 },
+      trackCtx
     );
   });
 }
 
-function playPatternMode(notes, beatDuration, hits, withMute = false, baseVel = velocity, stepMeta = null, chordRoot = null) {
+function playPatternMode(notes, beatDuration, hits, withMute = false, baseVel = velocity, stepMeta = null, chordRoot = null, trackCtx = null) {
   if (!Array.isArray(notes) || notes.length === 0 || hits < 2) return;
   const stepDur = beatDuration / hits;
   const baseDur = Math.max(stepDur * 1.12, 0.08);
@@ -5633,7 +6081,7 @@ function playPatternMode(notes, beatDuration, hits, withMute = false, baseVel = 
     const actualT = t + microDelay;
 
     if (isGhost) {
-      mutedStroke(notes, actualT, baseVel * 0.34 * accentVal);
+      mutedStroke(notes, actualT, baseVel * 0.34 * accentVal, trackCtx);
       continue;
     }
 
@@ -5652,6 +6100,7 @@ function playPatternMode(notes, beatDuration, hits, withMute = false, baseVel = 
       mode: patternModeKey,
       stepMeta,
       chordRoot,
+      trackCtx,
     });
   }
 }
@@ -5726,25 +6175,24 @@ function resolvePickedNote(notes, stringNumber) {
 // Minimize pitch jumps between consecutive chords by matching notes on the SAME string.
 // Previous implementation matched by array index, which broke when consecutive chords
 // had different numbers of notes (e.g. D(4 notes) → E(6 notes) shifted everything up an octave).
-function applyVoiceLeading(notes, chordName) {
+function applyVoiceLeading(notes, chordName, externalPrevPitches) {
   if (!notes.length) return notes;
-  if (!previousVoicingPitches || typeof previousVoicingPitches !== 'object') {
-    // Store as a map: stringIndex → pitch
-    previousVoicingPitches = {};
-    notes.forEach(n => { previousVoicingPitches[n.stringIndex] = n.pitch; });
+  const prevPitches = externalPrevPitches !== undefined ? externalPrevPitches : previousVoicingPitches;
+  if (!prevPitches || typeof prevPitches !== 'object') {
+    const newMap = {};
+    notes.forEach(n => { newMap[n.stringIndex] = n.pitch; });
+    if (externalPrevPitches === undefined) previousVoicingPitches = newMap;
     return notes;
   }
 
   const result = notes.map(note => {
-    // Match by string, not by array position
-    const prevPitch = previousVoicingPitches[note.stringIndex];
+    const prevPitch = prevPitches[note.stringIndex];
     if (!Number.isFinite(prevPitch)) return note;
 
     const pitchClass = note.pitch % 12;
     let bestPitch = note.pitch;
     let bestDist = Math.abs(note.pitch - prevPitch);
 
-    // Try closest octave variants within guitar range (E2=40 to B5=83)
     for (let oct = 3; oct <= 6; oct++) {
       const candidate = pitchClass + oct * 12;
       if (candidate < 40 || candidate > 84) continue;
@@ -5758,9 +6206,9 @@ function applyVoiceLeading(notes, chordName) {
     return Object.assign({}, note, { pitch: bestPitch });
   });
 
-  // Update per-string map
-  previousVoicingPitches = {};
-  result.forEach(n => { previousVoicingPitches[n.stringIndex] = n.pitch; });
+  const newMap = {};
+  result.forEach(n => { newMap[n.stringIndex] = n.pitch; });
+  if (externalPrevPitches === undefined) previousVoicingPitches = newMap;
   return result;
 }
 
@@ -5819,13 +6267,19 @@ function vibrateSingleStringByNumber(stringNumber, delay = 0) {
   }, Math.max(0, delay));
 }
 
-function playChord(chordName, mode, beatDuration, singleStringChoice = null, stepMeta = null) {
+function playChord(chordName, mode, beatDuration, singleStringChoice = null, stepMeta = null, trackCtx = null) {
   if (!ctx) return;
   let notes = getChordPlayableNotes(chordName, singleStringChoice);
   if (notes.length === 0) return;
 
-  // Voice leading disabled — play exact tablature fingerings for recognizable guitar sound
-  // notes = applyVoiceLeading(notes, chordName);
+  // Voice leading: per-track state when trackCtx present
+  if (trackCtx && trackCtx._track) {
+    notes = applyVoiceLeading(notes, chordName, trackCtx._track.previousVoicingPitches);
+    trackCtx._track.previousVoicingPitches = {};
+    notes.forEach(n => { trackCtx._track.previousVoicingPitches[n.stringIndex] = n.pitch; });
+  } else {
+    // notes = applyVoiceLeading(notes, chordName);
+  }
   const chordRoot = getChordRootPitch(chordName);
 
   const vel = (stepMeta && Number.isFinite(stepMeta.vel)) ? (stepMeta.vel / 100) : velocity;
@@ -5846,11 +6300,11 @@ function playChord(chordName, mode, beatDuration, singleStringChoice = null, ste
 
   if (meterMode) {
     const patternMeta = Object.assign({ humanizeTimeMs, tightness }, stepMeta || {});
-    playPatternMode(notes, beatDuration, meterMode.hits, meterMode.mute, vel, patternMeta, chordRoot);
+    playPatternMode(notes, beatDuration, meterMode.hits, meterMode.mute, vel, patternMeta, chordRoot, trackCtx);
     return;
   }
 
-  if (tryPlayChordNativeWebAudioFont(notes, mode, beatDuration, vel, stepMeta)) {
+  if (!trackCtx && tryPlayChordNativeWebAudioFont(notes, mode, beatDuration, vel, stepMeta)) {
     return;
   }
 
@@ -5870,7 +6324,8 @@ function playChord(chordName, mode, beatDuration, singleStringChoice = null, ste
           stepMeta,
           releaseBias: 0.8,
           chordRoot,
-        }
+        },
+        trackCtx
       );
     });
     return;
@@ -5959,7 +6414,8 @@ function playChord(chordName, mode, beatDuration, singleStringChoice = null, ste
           stepMeta,
           releaseBias: mode === 'arpeggio-slow' ? 1.12 : 0.98,
           chordRoot,
-        }
+        },
+        trackCtx
       );
     }
   } else if (mode === 'strum-down') {
@@ -5975,6 +6431,7 @@ function playChord(chordName, mode, beatDuration, singleStringChoice = null, ste
       mode: 'strum-down',
       stepMeta,
       chordRoot,
+      trackCtx,
     });
   } else if (mode === 'strum-up') {
     const hitRatio = (stepMeta && Number.isFinite(stepMeta.patternRatio)) ? stepMeta.patternRatio : 1;
@@ -5989,6 +6446,7 @@ function playChord(chordName, mode, beatDuration, singleStringChoice = null, ste
       mode: 'strum-up',
       stepMeta,
       chordRoot,
+      trackCtx,
     });
   } else if (mode === 'strum-both') {
     strumStroke(notes, {
@@ -6002,6 +6460,7 @@ function playChord(chordName, mode, beatDuration, singleStringChoice = null, ste
       mode: 'strum-both',
       stepMeta,
       chordRoot,
+      trackCtx,
     });
     if (beatDuration > 0.38) {
       strumStroke(notes.slice(0, 4), {
@@ -6015,6 +6474,7 @@ function playChord(chordName, mode, beatDuration, singleStringChoice = null, ste
         mode: 'strum-up',
         stepMeta: Object.assign({}, stepMeta, { accent: Number.isFinite(stepMeta?.accent) ? stepMeta.accent : 0.95 }),
         chordRoot,
+        trackCtx,
       });
     }
   } else if (mode === 'slow-strum') {
@@ -6029,11 +6489,12 @@ function playChord(chordName, mode, beatDuration, singleStringChoice = null, ste
       mode: 'slow-strum',
       stepMeta: Object.assign({}, stepMeta, { accent: Number.isFinite(stepMeta?.accent) ? stepMeta.accent : 1.02 }),
       chordRoot,
+      trackCtx,
     });
   }
 }
 
-function playChordStrum(chordName, hit, durationSecs, singleStringChoice = null) {
+function playChordStrum(chordName, hit, durationSecs, singleStringChoice = null, trackCtx = null) {
   if (!chordName) return;
   const mode = hitToMode(hit);
   // allow passing step metadata via singleStringChoice if it's actually an object
@@ -6042,7 +6503,7 @@ function playChordStrum(chordName, hit, durationSecs, singleStringChoice = null)
     stepMeta = singleStringChoice;
     singleStringChoice = stepMeta.singleStringOverride ?? null;
   }
-  playChord(chordName, mode, Math.max(0.05, durationSecs), singleStringChoice, stepMeta);
+  playChord(chordName, mode, Math.max(0.05, durationSecs), singleStringChoice, stepMeta, trackCtx);
 }
 
 // ===================== SEQUENCER =====================
@@ -6154,6 +6615,155 @@ function highlightRiffNote(stepIdx, noteIdx = 0) {
 }
 
 function triggerStep(i) {
+  const audibleTracks = getAudibleTracks();
+  // Multi-track mode: dispatch to each track independently
+  if (audibleTracks) {
+    // Highlight step (use main steps for UI)
+    document.querySelectorAll('.step-cell').forEach(c => c.classList.remove('active-step'));
+    const cell = document.getElementById(`step-${i}`);
+    if (cell) { cell.classList.add('active-step'); cell.classList.add('playing-glow'); setTimeout(() => cell.classList.remove('playing-glow'), 500); }
+    document.getElementById('statusDot').classList.add('on');
+    clearHitTimers();
+    const mainStep = steps[i] || { chord: '—' };
+    updateChordDisplay(mainStep.chord);
+
+    audibleTracks.forEach(track => {
+      const trackSteps = getTrackSteps(track);
+      const stepIdx = i % trackSteps.length;
+      const tStep = trackSteps[stepIdx];
+      if (!tStep || tStep.chord === '—') return;
+      const tCtx = { instruments: track.instruments, volume: track.volume, _track: track };
+      triggerStepForTrack(stepIdx, tStep, tCtx);
+    });
+
+    // Update loop progress
+    const pct = ((i+1)/steps.length)*100;
+    document.getElementById('loopProgress').style.width = pct + '%';
+    return;
+  }
+
+  // Legacy single-track mode (no tracks[] defined) — original behaviour
+  triggerStepLegacy(i);
+}
+
+// Per-track step trigger: plays a single step on a single track
+function triggerStepForTrack(i, step, trackCtx) {
+  const track = trackCtx._track;
+  const mode = getEffectiveMode(step);
+  const stepSingleString = getEffectiveSingleString(step);
+  const barMs = bpmToMs(tempo) * getBeatsPerBar();
+  const forcedHit = overrideToHit(step.strumOverride);
+  const stepMeta = Object.assign({}, step, { singleStringOverride: stepSingleString });
+  const chordStepMeta = Object.assign({}, stepMeta);
+  const swingForStep = getEffectiveSwingAmount(stepMeta);
+  const pickConfig = PLAYABLE_CHORDS.includes(step.chord) ? getEffectivePickConfig(step, mode) : null;
+
+  // Per-track chord group — does NOT kill voices in other tracks
+  track.chordGroupId++;
+  const releaseMode = pickConfig ? pickConfig.thenMode : (forcedHit ? hitToMode(forcedHit) : mode);
+  const releaseMs = clamp(barMs * 0.015 * getModeReleaseMultiplier(releaseMode), 16, 92);
+  stopPreviousTrackVoices(track, releaseMs / 1000);
+
+  let stageOffsetMs = 0;
+
+  if (step.riff && Array.isArray(step.riff.frets) && step.riff.frets.length > 0) {
+    const riffBeats = Math.max(1, Math.min(4, step.riffBeats ?? 1));
+    const riffMs = (barMs * riffBeats) / 4;
+    const noteMs = riffMs / step.riff.frets.length;
+    const riffString = Math.max(1, Math.min(6, step.riff.string ?? 1));
+    const baseNote = getBaseNoteForString(riffString);
+    const baseVelocity = Number.isFinite(stepMeta.vel) ? (stepMeta.vel / 100) : velocity;
+    const riffVelocity = Math.min(1, baseVelocity * 1.2);
+    const riffStepMeta = Object.assign({}, chordStepMeta, {
+      humanizeTimeMs: Math.max(0, getEffectiveHumanizeTimeMs(chordStepMeta) * 0.75),
+    });
+
+    step.riff.frets.forEach((fret, idx) => {
+      const tMs = Math.max(0, Math.round(stageOffsetMs + (idx * noteMs) + getTimingHumanizeMs(riffStepMeta, Math.min(10, noteMs * 0.2))));
+      const safeFret = Number.isFinite(+fret) ? Math.max(0, Math.round(+fret)) : 0;
+      const pitch = baseNote + safeFret;
+      const dur = Math.max(0.05, (noteMs / 1000) * 0.9);
+      const hitGain = Math.min(1, riffVelocity * getVelocityHumanizeMultiplier(riffStepMeta, 0.75));
+
+      const timerId = setTimeout(() => {
+        if (!isPlaying) return;
+        playNote(pitch, 0, dur, hitGain, {
+          stringIndex: riffString - 1,
+          direction: 'down',
+          muted: false,
+          accent: 1.12,
+          stepMeta: riffStepMeta,
+          releaseBias: 0.9,
+        }, trackCtx);
+      }, tMs);
+      hitTimers.push(timerId);
+    });
+
+    chordStepMeta.vel = clamp(Math.round(baseVelocity * 100 * 0.8), 0, 100);
+    stageOffsetMs += Math.round(riffMs);
+  }
+
+  const remainingMs = Math.max(0, barMs - stageOffsetMs);
+  let pickMs = 0;
+  if (pickConfig) {
+    const pickNotes = getChordPlayableNotes(step.chord, null);
+    if (pickNotes.length) {
+      pickMs = Math.min(remainingMs, (barMs * pickConfig.beats) / getBeatsPerBar());
+      if (pickMs >= 25) {
+        schedulePickSequence(step, pickNotes, pickConfig, stageOffsetMs, pickMs, chordStepMeta);
+      } else {
+        pickMs = 0;
+      }
+    }
+  }
+
+  const strumStartMs = stageOffsetMs + pickMs;
+  const strumMs = Math.max(0, remainingMs - pickMs);
+  const activeMode = pickConfig ? pickConfig.thenMode : mode;
+
+  let pattern;
+  let explicitHits = null;
+  if (Array.isArray(step.hits) && step.hits.length) {
+    explicitHits = step.hits;
+    pattern = step.hits.map(h => h.type || 'down');
+  } else {
+    const basePattern = getStrumPattern(activeMode);
+    pattern = forcedHit ? basePattern.map(() => forcedHit) : basePattern;
+  }
+
+  const baseVelPct = Number.isFinite(chordStepMeta.vel)
+    ? chordStepMeta.vel
+    : clamp(Math.round(velocity * 100), 0, 100);
+  const pulseSecs = Math.max(0.05, (strumMs / 1000) / Math.max(1, pattern.length));
+  const pulseMs = strumMs / Math.max(1, pattern.length);
+
+  if (strumMs > 5) pattern.forEach((hit, hitIndex) => {
+    const hitEntry = explicitHits ? explicitHits[hitIndex] : null;
+    const hitSwing = (hitEntry && hitEntry.swing !== null && hitEntry.swing !== undefined)
+      ? clamp(Math.abs(hitEntry.swing) * 70, 0, 70)
+      : swingForStep;
+    const swingOffset = getSwingOffsetMs(hitIndex, pulseMs, hitSwing);
+    const timingJitter = getTimingHumanizeMs(chordStepMeta, Math.min(14, pulseMs * 0.22));
+    const scheduleAt = Math.max(
+      0,
+      Math.min(strumStartMs + strumMs - 2, strumStartMs + (hitIndex * pulseMs) + swingOffset + timingJitter)
+    );
+    const timerId = setTimeout(() => {
+      if (!isPlaying) return;
+      const hitVel = (hitEntry && hitEntry.vel !== null && hitEntry.vel !== undefined) ? hitEntry.vel : null;
+      const velMult = getPatternHitVelocityMultiplier(activeMode, hitIndex);
+      const finalVel = hitVel !== null ? hitVel : clamp(Math.round(baseVelPct * velMult), 0, 100);
+      const patternRatio = getPatternHitRatio(activeMode, hitIndex);
+      const stepForHit = Object.assign({}, chordStepMeta, { vel: finalVel, patternRatio });
+      playChordStrum(step.chord, hit, pulseSecs, stepForHit, trackCtx);
+      vibrateStrings(step.chord, hitToMode(hit), 0, stepSingleString);
+    }, Math.round(scheduleAt));
+    hitTimers.push(timerId);
+  });
+}
+
+// Original single-track triggerStep (legacy mode w/o tracks[])
+function triggerStepLegacy(i) {
   const step = steps[i];
   const mode = getEffectiveMode(step);
   const stepSingleString = getEffectiveSingleString(step);
@@ -6324,6 +6934,12 @@ async function startSequencer() {
     currentStep = 0;
     previousVoicingPitches = null; // reset voice leading on new playback
     currentChordGroupId = 0;
+    // Reset per-track playback state
+    tracks.forEach(t => {
+      t.chordGroupId = 0;
+      t.activeVoices = [];
+      t.previousVoicingPitches = null;
+    });
     // Start lookahead scheduler
     startLookaheadScheduler();
   } finally {
@@ -6401,9 +7017,11 @@ function stopSequencer() {
   clearTimeout(playInterval);
   clearHitTimers();
   stopActiveVoices(0.012);
+  stopAllTrackVoices(0.012);
   currentStep = 0;
   previousVoicingPitches = null; // reset voice leading
   currentChordGroupId = 0;
+  tracks.forEach(t => { t.chordGroupId = 0; t.activeVoices = []; t.previousVoicingPitches = null; });
   document.getElementById('playBtn').classList.remove('playing');
   document.getElementById('playBtn').textContent = '▶';
   setTransportState('stopped');
@@ -6647,6 +7265,7 @@ updateTempoUI();
 updateVolumeUI();
 updateVelocityUI();
 updateSwingUI();
+renderTracksUI();
 </script>
 </body>
 </html>
